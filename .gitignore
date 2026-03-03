@@ -1,0 +1,34 @@
+# ── Secrets (ne jamais commit) ──
+*.db
+*.log
+.env
+jarvis_memory.db
+jarvis.log
+debug.log
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Environnements virtuels ──
+venv/
+.venv/
+env/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+Thumbs.db
+.DS_Store
+desktop.ini
