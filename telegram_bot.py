@@ -8,6 +8,7 @@ Gère les messages texte et les commandes.
 import logging
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -44,9 +45,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     response = brain.handle_command(user_id, text)
 
     if response:
-        # Telegram a une limite de 4096 caractères par message
-        for chunk in _split_message(response):
-            await update.message.reply_text(chunk, parse_mode="Markdown")
+        await _safe_reply(update.message, response)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -71,8 +70,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Erreur lors du traitement : %s", e)
         response = "⚠️ Désolé, une erreur s'est produite. Réessaie dans un instant."
 
-    for chunk in _split_message(response):
-        await update.message.reply_text(chunk, parse_mode="Markdown")
+    await _safe_reply(update.message, response)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -81,6 +79,19 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ── Utilitaires ──────────────────────────────────────────
+
+async def _safe_reply(message, text: str) -> None:
+    """
+    Envoie un message en Markdown. Si Telegram refuse le formatage
+    (caractères Markdown mal fermés), renvoie en texte brut.
+    """
+    for chunk in _split_message(text):
+        try:
+            await message.reply_text(chunk, parse_mode="Markdown")
+        except BadRequest:
+            logger.warning("Markdown invalide, renvoi en texte brut.")
+            await message.reply_text(chunk)
+
 
 def _split_message(text: str, max_len: int = 4000) -> list[str]:
     """Découpe un message trop long pour Telegram."""
