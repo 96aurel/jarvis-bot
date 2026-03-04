@@ -22,7 +22,29 @@ import scraper
 
 logger = logging.getLogger("jarvis.brain")
 
-_client = OpenAI(api_key=config.OPENAI_API_KEY)
+
+def _build_llm_client() -> tuple[OpenAI, str]:
+    """
+    Crée le client LLM selon le provider configuré.
+    Retourne (client, model_name).
+    """
+    provider = config.LLM_PROVIDER.lower()
+
+    if provider == "groq":
+        logger.info("LLM provider : Groq (%s)", config.GROQ_MODEL)
+        client = OpenAI(
+            api_key=config.GROQ_API_KEY,
+            base_url=config.GROQ_BASE_URL,
+        )
+        return client, config.GROQ_MODEL
+
+    else:  # openai par défaut
+        logger.info("LLM provider : OpenAI (%s)", config.OPENAI_MODEL)
+        client = OpenAI(api_key=config.OPENAI_API_KEY)
+        return client, config.OPENAI_MODEL
+
+
+_client, _model = _build_llm_client()
 
 # ── Chargement de l'identité ────────────────────────────
 
@@ -112,7 +134,7 @@ def _build_system_prompt(user_id: int) -> str:
 def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
     """Appelle l'API OpenAI et retourne le contenu de la réponse."""
     response = _client.chat.completions.create(
-        model=config.OPENAI_MODEL,
+        model=_model,
         messages=messages,
         temperature=temperature,
         max_tokens=1500,

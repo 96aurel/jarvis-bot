@@ -25,7 +25,16 @@ ALLOWED_USER_IDS: list[int] = [
     int(uid.strip()) for uid in _raw_ids.split(",") if uid.strip().isdigit()
 ]
 
-# ── OpenAI / LLM ────────────────────────────────────────
+# ── LLM Provider ─────────────────────────────────────────
+# Choix du fournisseur : "groq" (gratuit & rapide) ou "openai"
+LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "groq")
+
+# ── Groq (recommandé — gratuit) ─────────────────────────
+GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+
+# ── OpenAI (optionnel) ──────────────────────────────────
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 

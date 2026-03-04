@@ -38,12 +38,21 @@ def setup_logging() -> None:
 def check_config() -> bool:
     """Vérifie que la configuration minimale est renseignée."""
     ok = True
-    if not config.TELEGRAM_BOT_TOKEN or config.TELEGRAM_BOT_TOKEN == "TON_TOKEN_TELEGRAM_ICI":
-        logging.error("❌ TELEGRAM_BOT_TOKEN non configuré dans config.py")
+    if not config.TELEGRAM_BOT_TOKEN:
+        logging.error("❌ TELEGRAM_BOT_TOKEN non configuré")
         ok = False
-    if not config.OPENAI_API_KEY or config.OPENAI_API_KEY == "TA_CLE_OPENAI_ICI":
-        logging.error("❌ OPENAI_API_KEY non configurée dans config.py")
+
+    provider = config.LLM_PROVIDER.lower()
+    if provider == "groq" and not config.GROQ_API_KEY:
+        logging.error("❌ GROQ_API_KEY non configurée (LLM_PROVIDER=groq)")
         ok = False
+    elif provider == "openai" and not config.OPENAI_API_KEY:
+        logging.error("❌ OPENAI_API_KEY non configurée (LLM_PROVIDER=openai)")
+        ok = False
+
+    if ok:
+        logging.info("✅ Provider LLM : %s", provider)
+
     return ok
 
 
