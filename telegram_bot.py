@@ -10,7 +10,7 @@ Comportement naturel :
 
 import asyncio
 import logging
-import random
+import re
 import tempfile
 from collections import defaultdict
 from pathlib import Path
@@ -40,6 +40,13 @@ _message_buffers: dict[int, list[dict]] = defaultdict(list)
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 # Timers actifs par utilisateur
 _batch_timers: dict[int, asyncio.Task] = {}
+
+# Extensions de fichiers texte supportés
+_TEXT_EXTENSIONS = {
+    '.txt', '.csv', '.json', '.py', '.js', '.ts', '.html', '.css',
+    '.md', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.log',
+    '.sh', '.bat', '.sql', '.r', '.java', '.c', '.cpp', '.h', '.rb',
+}
 
 
 # ── Vérification d'accès ────────────────────────────────
@@ -106,64 +113,71 @@ async def _process_batch_after_delay(user_id: int, chat, context) -> None:
     await asyncio.sleep(BATCH_DELAY)
 
     async with _user_locks[user_id]:
-        # Récupérer et vider le buffer
         buffered = _message_buffers.pop(user_id, [])
         if not buffered:
             return
 
-        # Le dernier message reçu — on répondra à celui-ci ou on citera un autre
-        last_msg: Message = buffered[-1]["message"]
-
-        # Construire le message combiné
-        if len(buffered) == 1:
-            # Un seul message : comportement normal
-            combined_text = buffered[0]["text"]
-            reply_to_msg = last_msg
-        else:
-            # Plusieurs messages : les numéroter pour que le LLM puisse citer
-            parts = []
-            for i, buf in enumerate(buffered, 1):
-                parts.append(f"[Message {i}] {buf['text']}")
-            combined_text = (
-                f"L'utilisateur a envoye {len(buffered)} messages d'affilee :\n\n"
-                + "\n".join(parts)
-                + "\n\nReponds a tous ces messages de maniere fluide. "
-                "Si certains messages sont lies, regroupe ta reponse. "
-                "Si un message merite une reponse specifique, mentionne-le."
-            )
-            reply_to_msg = last_msg
-            logger.info("Batch de %d messages pour user %d", len(buffered), user_id)
-
-        # Typing naturel — comme une vraie personne
         typing_task = asyncio.create_task(_keep_typing(chat))
 
-        try:
-            response = brain.think_and_respond(user_id, combined_text)
-        except Exception as e:
-            logger.exception("Erreur : %s", e)
-            response = "Desole, j'ai eu un souci. Reessaie."
-        finally:
-            typing_task.cancel()
+        if len(buffered) == 1:
+            # Un seul message — réponse directe
+            try:
+                response = brain.think_and_respond(user_id, buffered[0]["text"])
+            except Exception as e:
+                logger.exception("Erreur : %s", e)
+                response = "Desole, j'ai eu un souci. Reessaie."
+            finally:
+                typing_task.cancel()
+            await _safe_reply(buffered[0]["message"], response, quote=True)
+        else:
+            # Plusieurs messages — réponse individuelle à chacun (quote séparé)
+            logger.info("Batch de %d messages pour user %d", len(buffered), user_id)
+            parts = []
+            for i, buf in enumerate(buffered, 1):
+                parts.append(f"[MSG {i}] {buf['text']}")
+            combined = (
+                f"L'utilisateur a envoye {len(buffered)} messages d'affilee :\n\n"
+                + "\n".join(parts)
+                + "\n\nReponds a chaque message separement. "
+                "Prefixe chaque reponse avec [R1], [R2], etc. correspondant au numero du message. "
+                "Si des messages sont lies tu peux mentionner le lien mais reponds quand meme a chacun. "
+                "Si un message est trivial (genre 'ok' ou un emoji) tu peux repondre tres court."
+            )
+            try:
+                response = brain.think_and_respond(user_id, combined)
+            except Exception as e:
+                logger.exception("Erreur : %s", e)
+                response = "Desole, j'ai eu un souci. Reessaie."
+            finally:
+                typing_task.cancel()
 
-        # Choisir à quel message répondre (quote)
-        # Si plusieurs messages, on reply au dernier (le plus récent)
-        # Si un seul, on reply directement dessus
-        quote_msg = _pick_quote_message(buffered, response)
+            # Parser les réponses individuelles [R1], [R2], etc.
+            replies = _parse_batch_response(response, len(buffered))
+            if replies:
+                for msg_idx, text in replies:
+                    target = buffered[msg_idx]["message"] if 0 <= msg_idx < len(buffered) else buffered[-1]["message"]
+                    await _safe_reply(target, text, quote=True)
+            else:
+                # Parsing échoué — envoyer tout au dernier message
+                await _safe_reply(buffered[-1]["message"], response, quote=True)
 
-        await _safe_reply(quote_msg, response, quote=True)
 
+def _parse_batch_response(response: str, num_messages: int) -> list[tuple[int, str]] | None:
+    """Parse les marqueurs [R1], [R2], ... dans la réponse du LLM."""
+    markers = list(re.finditer(r'\[R(\d+)\]', response))
+    if not markers:
+        return None
 
-def _pick_quote_message(buffered: list[dict], response: str) -> Message:
-    """
-    Choisit le message le plus pertinent à citer.
-    Si un seul message → celui-ci.
-    Si plusieurs → le dernier par défaut (plus naturel sur Telegram).
-    """
-    if len(buffered) == 1:
-        return buffered[0]["message"]
+    results = []
+    for j, match in enumerate(markers):
+        msg_idx = int(match.group(1)) - 1  # 0-based
+        start = match.end()
+        end = markers[j + 1].start() if j + 1 < len(markers) else len(response)
+        text = response[start:end].strip()
+        if text:
+            results.append((msg_idx, text))
 
-    # On cite le dernier message (le plus naturel dans un flux Telegram)
-    return buffered[-1]["message"]
+    return results if results else None
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,6 +253,86 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Erreur avec l'image.")
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gère les fichiers (PDF, txt, code, etc.) — extraction + réponse."""
+    user_id = update.effective_user.id
+    if not _is_authorized(user_id):
+        return
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    filename = doc.file_name or "fichier"
+    caption = update.message.caption or f"Analyse ce fichier : {filename}"
+    ext = Path(filename).suffix.lower()
+
+    try:
+        file = await doc.get_file()
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            tmp_path = tmp.name
+
+        # Extraire le texte selon le type de fichier
+        if ext == '.pdf':
+            text_content = _extract_pdf_text(tmp_path)
+        elif ext in _TEXT_EXTENSIONS:
+            text_content = Path(tmp_path).read_text(encoding='utf-8', errors='replace')
+        else:
+            Path(tmp_path).unlink(missing_ok=True)
+            await update.message.reply_text(
+                f"Je sais pas lire les fichiers {ext} pour l'instant. "
+                "J'accepte les PDF et les fichiers texte/code."
+            )
+            return
+
+        Path(tmp_path).unlink(missing_ok=True)
+
+        if not text_content or len(text_content.strip()) < 10:
+            await update.message.reply_text("J'ai pas reussi a extraire du texte de ce fichier.")
+            return
+
+        # Tronquer si trop long
+        if len(text_content) > 8000:
+            text_content = text_content[:8000] + "\n\n[... fichier tronque]"
+
+        combined = f"[Fichier : {filename}]\n\n{text_content}\n\nQuestion/contexte : {caption}"
+
+        typing_task = asyncio.create_task(_keep_typing(update.message.chat))
+        try:
+            response = brain.think_and_respond(user_id, combined)
+        except Exception as e:
+            logger.exception("Erreur document : %s", e)
+            response = "J'ai pas reussi a analyser le fichier."
+        finally:
+            typing_task.cancel()
+
+        await _safe_reply(update.message, response, quote=True)
+
+    except Exception as e:
+        logger.exception("Erreur document : %s", e)
+        await update.message.reply_text("Erreur avec ce fichier.")
+
+
+def _extract_pdf_text(path: str) -> str:
+    """Extrait le texte d'un fichier PDF."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        pages = []
+        for i, page in enumerate(reader.pages[:30]):
+            text = page.extract_text()
+            if text:
+                pages.append(f"--- Page {i+1} ---\n{text}")
+        return "\n\n".join(pages)
+    except ImportError:
+        logger.warning("pypdf non installe — lecture PDF impossible")
+        return ""
+    except Exception as e:
+        logger.error("Erreur extraction PDF : %s", e)
+        return ""
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Erreur Telegram : %s", context.error, exc_info=context.error)
 
@@ -305,6 +399,7 @@ def run_bot() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_error_handler(error_handler)
 
     logger.info("Bot pret !")

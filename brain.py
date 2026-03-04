@@ -118,21 +118,32 @@ def analyze_image(user_id: int, image_path: str, caption: str) -> str:
         ]},
     ]
 
-    try:
-        # Essayer avec le modèle configuré (vision supportée par la plupart)
-        response = _client.chat.completions.create(
-            model=_model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1000,
-        )
-        result = response.choices[0].message.content.strip()
-        memory.save_message(user_id, "user", f"[Photo] {caption}")
-        memory.save_message(user_id, "assistant", result)
-        return result
-    except Exception as e:
-        logger.error("Erreur analyse image : %s", e)
-        return "Désolé, je n'ai pas pu analyser cette image. Le modèle actuel ne supporte peut-être pas la vision."
+    # Chaîne de fallback vision : Groq vision → Gemini → modèle principal
+    vision_chain: list[tuple[OpenAI, str]] = []
+    if config.GROQ_API_KEY and config.GROQ_VISION_MODEL:
+        vision_chain.append((_groq_client or _client, config.GROQ_VISION_MODEL))
+    if _gemini_client:
+        vision_chain.append((_gemini_client, config.GEMINI_MODEL))
+    vision_chain.append((_client, _model))  # Dernier recours
+
+    for i, (client, model) in enumerate(vision_chain):
+        try:
+            logger.info("Vision essai #%d : %s", i, model)
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=1000,
+            )
+            result = response.choices[0].message.content.strip()
+            memory.save_message(user_id, "user", f"[Photo] {caption}")
+            memory.save_message(user_id, "assistant", result)
+            return result
+        except Exception as e:
+            logger.warning("Vision echouee sur %s : %s", model, str(e)[:200])
+            continue
+
+    return "J'ai pas reussi a analyser cette image."
 
 
 # ── Chargement de l'identité ────────────────────────────
