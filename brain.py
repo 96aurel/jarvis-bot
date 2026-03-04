@@ -250,7 +250,11 @@ Le separateur ||| cree un nouveau message avec un petit delai de frappe entre ch
 N'abuse pas : 1-3 bulles max en general. Parfois une seule bulle suffit.
 
 Si tu dois programmer un rappel, inclus le marqueur [REMIND:Xs:message] dans ta reponse.
-Exemple : "Ok je te rappelle dans 5 min ![REMIND:300s:Eh, c'est l'heure de bosser sur ton projet !]"
+Exemple : "Ok je te rappelle dans 5 min [REMIND:300s:Eh, c'est l'heure de bosser sur ton projet !]"
+
+Si tu veux reagir au message de l'utilisateur avec un emoji (parce que c'est drole, impressionnant, etc.),
+ajoute [REACT:emoji] dans ta reponse. Exemples : [REACT:😂] [REACT:🔥] [REACT:💀] [REACT:❤️]
+Fais-le de temps en temps quand c'est motive, pas a chaque message.
 """
 
 
@@ -337,6 +341,10 @@ def think_and_respond(user_id: int, user_message: str) -> str:
                 "que tu ne connais PAS avec certitude (actualites, paroles de chansons, "
                 "prix actuels, resultats sportifs, etc.). "
                 "Si tu peux repondre de memoire avec certitude, utilise {\"tool\": \"none\"}.\n\n"
+                "IMPORTANT SUR save_fact : N'utilise save_fact QUE si l'utilisateur dit EXPLICITEMENT "
+                "une info factuelle dans le message actuel (ex: 'j'ai un exam de maths le 15'). "
+                "Ne deduis PAS de faits a partir du contexte. Ne memorise PAS d'infos inventees. "
+                "En cas de doute, ne sauvegarde PAS.\n\n"
                 f"{TOOLS_DESCRIPTION}\n\n"
                 f"Faits memorises :\n{memory.get_facts_summary(user_id)}"
             )},

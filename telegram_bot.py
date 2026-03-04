@@ -17,7 +17,7 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-from telegram import Update, Message
+from telegram import Update, Message, ReactionTypeEmoji
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
@@ -124,25 +124,27 @@ async def _process_batch_after_delay(user_id: int, chat, context) -> None:
         typing_task = asyncio.create_task(_keep_typing(chat))
 
         if len(buffered) == 1:
-            # Un seul message — réponse directe
             try:
-                response = brain.think_and_respond(user_id, buffered[0]["text"])
+                response = await asyncio.to_thread(
+                    brain.think_and_respond, user_id, buffered[0]["text"]
+                )
             except Exception as e:
                 logger.exception("Erreur : %s", e)
                 response = "Desole, j'ai eu un souci. Reessaie."
             finally:
                 typing_task.cancel()
 
-            # Vérifier si le LLM a programmé un rappel
             response, reminder = _extract_reminder(response)
+            response, reaction = _extract_reaction(response)
             if reminder:
                 asyncio.create_task(
                     _schedule_reminder(chat.id, user_id, reminder["delay"], reminder["text"])
                 )
+            if reaction:
+                await _react(buffered[0]["message"], reaction)
 
             await _send_natural(chat, buffered[0]["message"], response)
         else:
-            # Plusieurs messages — réponse individuelle à chacun (quote séparé)
             logger.info("Batch de %d messages pour user %d", len(buffered), user_id)
             parts = []
             for i, buf in enumerate(buffered, 1):
@@ -156,21 +158,24 @@ async def _process_batch_after_delay(user_id: int, chat, context) -> None:
                 "Si un message est trivial (genre 'ok' ou un emoji) tu peux repondre tres court."
             )
             try:
-                response = brain.think_and_respond(user_id, combined)
+                response = await asyncio.to_thread(
+                    brain.think_and_respond, user_id, combined
+                )
             except Exception as e:
                 logger.exception("Erreur : %s", e)
                 response = "Desole, j'ai eu un souci. Reessaie."
             finally:
                 typing_task.cancel()
 
-            # Vérifier rappels
             response, reminder = _extract_reminder(response)
+            response, reaction = _extract_reaction(response)
             if reminder:
                 asyncio.create_task(
                     _schedule_reminder(chat.id, user_id, reminder["delay"], reminder["text"])
                 )
+            if reaction:
+                await _react(buffered[-1]["message"], reaction)
 
-            # Parser les réponses individuelles [R1], [R2], etc.
             replies = _parse_batch_response(response, len(buffered))
             if replies:
                 for msg_idx, reply_text in replies:
@@ -214,7 +219,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await file.download_to_drive(tmp.name)
             tmp_path = tmp.name
 
-        transcript = brain.transcribe_audio(tmp_path)
+        transcript = await asyncio.to_thread(brain.transcribe_audio, tmp_path)
         Path(tmp_path).unlink(missing_ok=True)
 
         if not transcript:
@@ -225,13 +230,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         typing_task = asyncio.create_task(_keep_typing(update.message.chat))
         try:
-            response = brain.think_and_respond(user_id, transcript)
+            response = await asyncio.to_thread(
+                brain.think_and_respond, user_id, transcript
+            )
         except Exception as e:
             logger.exception("Erreur : %s", e)
             response = "Desole, j'ai eu un souci avec le vocal."
         finally:
             typing_task.cancel()
 
+        response, reaction = _extract_reaction(response)
+        if reaction:
+            await _react(update.message, reaction)
         await _send_natural(update.message.chat, update.message, response)
 
     except Exception as e:
@@ -256,7 +266,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         typing_task = asyncio.create_task(_keep_typing(update.message.chat))
         try:
-            response = brain.analyze_image(user_id, tmp_path, caption)
+            response = await asyncio.to_thread(
+                brain.analyze_image, user_id, tmp_path, caption
+            )
         except Exception as e:
             logger.exception("Erreur : %s", e)
             response = "J'ai pas reussi a voir l'image."
@@ -264,6 +276,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             typing_task.cancel()
 
         Path(tmp_path).unlink(missing_ok=True)
+        response, reaction = _extract_reaction(response)
+        if reaction:
+            await _react(update.message, reaction)
         await _send_natural(update.message.chat, update.message, response)
 
     except Exception as e:
@@ -318,13 +333,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         typing_task = asyncio.create_task(_keep_typing(update.message.chat))
         try:
-            response = brain.think_and_respond(user_id, combined)
+            response = await asyncio.to_thread(
+                brain.think_and_respond, user_id, combined
+            )
         except Exception as e:
             logger.exception("Erreur document : %s", e)
             response = "J'ai pas reussi a analyser le fichier."
         finally:
             typing_task.cancel()
 
+        response, reaction = _extract_reaction(response)
+        if reaction:
+            await _react(update.message, reaction)
         await _send_natural(update.message.chat, update.message, response)
 
     except Exception as e:
@@ -364,6 +384,27 @@ def _get_quoted_context(update: Update) -> str | None:
     return None
 
 
+async def _react(message: Message, emoji: str) -> None:
+    """Ajoute une reaction emoji sur un message. Silencieux si ca echoue."""
+    try:
+        await message.set_reaction([ReactionTypeEmoji(emoji=emoji)])
+    except Exception:
+        pass
+
+
+def _extract_reaction(text: str) -> tuple[str, str | None]:
+    """
+    Detecte un marqueur [REACT:emoji] dans la reponse du LLM.
+    Retourne (texte_nettoye, emoji) ou (texte, None).
+    """
+    match = re.search(r'\[REACT:(.{1,2})\]', text)
+    if not match:
+        return text, None
+    emoji = match.group(1).strip()
+    cleaned = text[:match.start()] + text[match.end():]
+    return cleaned.strip(), emoji
+
+
 async def _keep_typing(chat, interval: float = 4.0) -> None:
     try:
         while True:
@@ -375,30 +416,27 @@ async def _keep_typing(chat, interval: float = 4.0) -> None:
 
 async def _send_natural(chat, reply_to_msg: Message, text: str) -> None:
     """
-    Envoie la réponse de manière naturelle :
-    - Si le LLM a utilisé ||| pour séparer des bulles, envoie chaque bulle
-      séparément avec un délai de typing entre chaque.
-    - La première bulle est en reply (quote), les suivantes sont "libres".
-    - Chaque bulle est précédée d'un typing ~0.5-1.5s (simule la frappe).
+    Envoie la reponse de maniere naturelle :
+    - Si le LLM a utilise ||| -> bulles separees avec typing entre chaque
+    - Typing AVANT chaque bulle (y compris la premiere)
+    - La premiere bulle est en reply, les suivantes libres
     """
-    # Séparer en bulles
     bubbles = [b.strip() for b in text.split("|||") if b.strip()]
     if not bubbles:
         return
 
     for i, bubble in enumerate(bubbles):
-        # Chaque bulle peut être longue — on la découpe si besoin
         chunks = _split_message(bubble)
         for j, chunk in enumerate(chunks):
-            # Typing avant d'envoyer (sauf la toute première bulle)
+            # Typing avant CHAQUE envoi (simule la frappe humaine)
+            delay = min(0.3 + len(chunk) * 0.006, 2.5)
             if i > 0 or j > 0:
-                # Simule le temps de frappe : proportionnel à la longueur, capé à 3s
-                delay = min(0.5 + len(chunk) * 0.008, 3.0)
-                await chat.send_action("typing")
-                await asyncio.sleep(delay)
+                # Delai plus long entre bulles separees
+                delay = min(0.8 + len(chunk) * 0.008, 3.5)
+            await chat.send_action("typing")
+            await asyncio.sleep(delay)
 
             kwargs = {}
-            # Seule la première bulle est en reply (quote)
             if i == 0 and j == 0:
                 kwargs["reply_to_message_id"] = reply_to_msg.message_id
 
@@ -460,12 +498,12 @@ def _extract_reminder(text: str) -> tuple[str, dict | None]:
 
 
 async def _schedule_reminder(chat_id: int, user_id: int, delay_seconds: int, text: str) -> None:
-    """Envoie un message après un délai."""
+    """Envoie un message apres un delai."""
     logger.info("Rappel programme dans %ds : %s", delay_seconds, text[:80])
     await asyncio.sleep(delay_seconds)
     try:
         if _app and _app.bot:
-            await _app.bot.send_action(chat_id=chat_id, action="typing")
+            await _app.bot.send_chat_action(chat_id=chat_id, action="typing")
             await asyncio.sleep(random.uniform(0.5, 1.5))
             await _app.bot.send_message(chat_id=chat_id, text=text)
             logger.info("Rappel envoye.")
