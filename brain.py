@@ -48,13 +48,21 @@ def _build_llm_client() -> tuple[OpenAI, str]:
 
 _client, _model = _build_llm_client()
 
-# Client Gemini (fallback gratuit quand Groq est limité)
-_gemini_client = OpenAI(
-    api_key=config.GEMINI_API_KEY,
-    base_url=config.GEMINI_BASE_URL,
-) if config.GEMINI_API_KEY else None
+# Client Gemini (fallback gratuit quand Groq est limite)
+try:
+    _gemini_client = OpenAI(
+        api_key=config.GEMINI_API_KEY,
+        base_url=config.GEMINI_BASE_URL,
+    ) if config.GEMINI_API_KEY else None
+    if _gemini_client:
+        logger.info("Gemini fallback configure : %s", config.GEMINI_MODEL)
+    else:
+        logger.warning("GEMINI_API_KEY absente — pas de fallback Gemini")
+except Exception as e:
+    logger.error("Erreur init Gemini : %s", e)
+    _gemini_client = None
 
-# Client Groq séparé pour Whisper (toujours Groq, même si le LLM est OpenAI)
+# Client Groq separe pour Whisper (toujours Groq, meme si le LLM est OpenAI)
 _groq_client = OpenAI(
     api_key=config.GROQ_API_KEY,
     base_url=config.GROQ_BASE_URL,
@@ -232,6 +240,7 @@ def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
 
     for i, (client, model) in enumerate(chain):
         try:
+            logger.info("Essai LLM #%d : %s", i, model)
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -243,12 +252,11 @@ def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
             return response.choices[0].message.content.strip()
 
         except RateLimitError as e:
-            logger.warning("Rate limit sur %s : %s", model, str(e)[:150])
-            # Passer au suivant dans la cha\u00eene
+            logger.warning("Rate limit sur %s : %s", model, str(e)[:200])
             continue
 
         except Exception as e:
-            logger.error("Erreur LLM sur %s : %s", model, str(e)[:150])
+            logger.error("Erreur LLM sur %s : %s", model, str(e)[:200])
             continue
 
     # Tous les fournisseurs ont \u00e9chou\u00e9
@@ -282,24 +290,24 @@ def think_and_respond(user_id: int, user_message: str) -> str:
         "{datetime}", datetime.now().strftime("%A %d %B %Y, %H:%M")
     )
 
-    # ── Phase de RÉFLEXION ──────────────────────────────
-    reflection_messages = [
-        {"role": "system", "content": (
-            "Tu es l'agent de réflexion de Jarvis. "
-            "Analyse le message de l'utilisateur et décide si tu dois utiliser un outil.\n\n"
-            f"{TOOLS_DESCRIPTION}\n\n"
-            f"Faits mémorisés :\n{memory.get_facts_summary(user_id)}"
-        )},
-        *history[-6:],  # Contexte récent pour la réflexion
-    ]
-
-    logger.info("Phase de réflexion…")
-    reflection_raw = _call_llm(reflection_messages, temperature=0.3)
-
-    # Essayer de parser la décision
+    # ── Phase de RÉFLEXION (skip si rate limited)────────
+    # On tente la réflexion mais si ça échoue, on passe directement à la réponse
     tool_result = ""
     try:
-        # Extraire le JSON de la réponse (même si entouré de texte)
+        reflection_messages = [
+            {"role": "system", "content": (
+                "Tu es l'agent de réflexion de Jarvis. "
+                "Analyse le message de l'utilisateur et décide si tu dois utiliser un outil.\n\n"
+                f"{TOOLS_DESCRIPTION}\n\n"
+                f"Faits mémorisés :\n{memory.get_facts_summary(user_id)}"
+            )},
+            *history[-6:],
+        ]
+
+        logger.info("Phase de réflexion...")
+        reflection_raw = _call_llm(reflection_messages, temperature=0.3)
+
+        # Essayer de parser la décision
         json_match = None
         for line in reflection_raw.split("\n"):
             line = line.strip()
@@ -307,7 +315,6 @@ def think_and_respond(user_id: int, user_message: str) -> str:
                 json_match = line
                 break
         if not json_match:
-            # Tenter sur tout le texte
             import re
             match = re.search(r'\{[^{}]+\}', reflection_raw)
             if match:
@@ -317,9 +324,9 @@ def think_and_respond(user_id: int, user_message: str) -> str:
             tool_call = json.loads(json_match)
             if tool_call.get("tool") and tool_call["tool"] != "none":
                 tool_result = _execute_tool(tool_call, user_id)
-                logger.info("Résultat de l'outil (%d caractères)", len(tool_result))
-    except (json.JSONDecodeError, Exception) as e:
-        logger.warning("Impossible de parser la réflexion : %s", e)
+                logger.info("Resultat de l'outil (%d caracteres)", len(tool_result))
+    except Exception as e:
+        logger.warning("Phase de reflexion echouee, passage direct a la reponse : %s", e)
 
     # ── Phase de RÉPONSE ────────────────────────────────
     response_messages = [
@@ -336,11 +343,12 @@ def think_and_respond(user_id: int, user_message: str) -> str:
             ),
         })
 
-    logger.info("Génération de la réponse…")
+    logger.info("Generation de la reponse...")
     response = _call_llm(response_messages)
 
-    # 5. Sauvegarder la réponse
-    memory.save_message(user_id, "assistant", response)
+    # 5. Sauvegarder la réponse (seulement si c'est une vraie reponse)
+    if not response.startswith("Tous mes fournisseurs"):
+        memory.save_message(user_id, "assistant", response)
 
     return response
 
