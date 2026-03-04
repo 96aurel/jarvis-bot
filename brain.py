@@ -12,6 +12,7 @@ Architecture :
 
 import json
 import logging
+import base64
 from pathlib import Path
 
 from openai import OpenAI
@@ -45,6 +46,79 @@ def _build_llm_client() -> tuple[OpenAI, str]:
 
 
 _client, _model = _build_llm_client()
+
+# Client Groq séparé pour Whisper (toujours Groq, même si le LLM est OpenAI)
+_groq_client = OpenAI(
+    api_key=config.GROQ_API_KEY,
+    base_url=config.GROQ_BASE_URL,
+) if config.GROQ_API_KEY else None
+
+
+# ── Transcription audio (Whisper via Groq) ──────────────
+
+def transcribe_audio(file_path: str) -> str:
+    """Transcrit un fichier audio avec Whisper via Groq (gratuit)."""
+    if not _groq_client:
+        logger.warning("Pas de GROQ_API_KEY, transcription impossible.")
+        return ""
+    try:
+        with open(file_path, "rb") as f:
+            transcription = _groq_client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=f,
+                language="fr",
+            )
+        return transcription.text.strip()
+    except Exception as e:
+        logger.error("Erreur transcription audio : %s", e)
+        return ""
+
+
+# ── Analyse d'image ──────────────────────────────────────
+
+def analyze_image(user_id: int, image_path: str, caption: str) -> str:
+    """Analyse une image en l'envoyant au LLM avec le caption."""
+    from datetime import datetime
+
+    # Encoder l'image en base64
+    try:
+        with open(image_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+    except Exception as e:
+        logger.error("Erreur lecture image : %s", e)
+        return "Erreur lors de la lecture de l'image."
+
+    # Construire le prompt
+    system_prompt = _build_system_prompt(user_id).replace(
+        "{datetime}", datetime.now().strftime("%A %d %B %Y, %H:%M")
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": [
+            {"type": "text", "text": caption},
+            {"type": "image_url", "image_url": {
+                "url": f"data:image/jpeg;base64,{image_data}",
+            }},
+        ]},
+    ]
+
+    try:
+        # Essayer avec le modèle configuré (vision supportée par la plupart)
+        response = _client.chat.completions.create(
+            model=_model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        result = response.choices[0].message.content.strip()
+        memory.save_message(user_id, "user", f"[Photo] {caption}")
+        memory.save_message(user_id, "assistant", result)
+        return result
+    except Exception as e:
+        logger.error("Erreur analyse image : %s", e)
+        return "Désolé, je n'ai pas pu analyser cette image. Le modèle actuel ne supporte peut-être pas la vision."
+
 
 # ── Chargement de l'identité ────────────────────────────
 
