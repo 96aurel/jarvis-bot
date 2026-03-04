@@ -13,9 +13,10 @@ Architecture :
 import json
 import logging
 import base64
+import time
 from pathlib import Path
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 import config
 import memory
@@ -206,14 +207,55 @@ def _build_system_prompt(user_id: int) -> str:
 
 
 def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
-    """Appelle l'API OpenAI et retourne le contenu de la réponse."""
-    response = _client.chat.completions.create(
-        model=_model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=1500,
-    )
-    return response.choices[0].message.content.strip()
+    """
+    Appelle l'API LLM avec gestion du rate limit :
+      1. Essaie avec le mod\u00e8le principal
+      2. Si rate limit (429) + provider Groq -> fallback sur le mod\u00e8le l\u00e9ger
+      3. Si \u00e7a \u00e9choue encore -> attend et r\u00e9essaie une fois
+    """
+    models_to_try = [_model]
+
+    # Ajouter le fallback Groq si disponible
+    if config.LLM_PROVIDER.lower() == "groq" and config.GROQ_FALLBACK_MODEL != _model:
+        models_to_try.append(config.GROQ_FALLBACK_MODEL)
+
+    for model in models_to_try:
+        try:
+            response = _client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=1500,
+            )
+            if model != _model:
+                logger.info("Reponse via modele fallback : %s", model)
+            return response.choices[0].message.content.strip()
+
+        except RateLimitError as e:
+            logger.warning("Rate limit sur %s : %s", model, e)
+
+            # Si c'est le dernier modele, attendre et reessayer
+            if model == models_to_try[-1]:
+                logger.info("Attente de 15s avant dernier essai...")
+                time.sleep(15)
+                try:
+                    response = _client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=800,  # Moins de tokens pour passer
+                    )
+                    return response.choices[0].message.content.strip()
+                except RateLimitError:
+                    return (
+                        "J'ai atteint ma limite de tokens pour aujourd'hui. "
+                        "Reessaie dans quelques minutes, ou demain pour un reset complet. "
+                        "Desole pour la gene !"
+                    )
+            # Sinon on passe au modele suivant
+            continue
+
+    return "Erreur inattendue lors de l'appel au LLM."
 
 
 # ── Boucle de réflexion principale ──────────────────────

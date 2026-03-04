@@ -32,6 +32,7 @@ LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "groq")
 # ── Groq (recommandé — gratuit) ─────────────────────────
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_FALLBACK_MODEL: str = os.environ.get("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
 GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
 GROQ_WHISPER_MODEL: str = "whisper-large-v3"  # Pour la transcription vocale (gratuit)
 
