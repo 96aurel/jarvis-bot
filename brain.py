@@ -337,10 +337,6 @@ def think_and_respond(user_id: int, user_message: str) -> str:
                 "que tu ne connais PAS avec certitude (actualites, paroles de chansons, "
                 "prix actuels, resultats sportifs, etc.). "
                 "Si tu peux repondre de memoire avec certitude, utilise {\"tool\": \"none\"}.\n\n"
-                "IMPORTANT SUR save_fact : N'utilise save_fact QUE si l'utilisateur dit EXPLICITEMENT "
-                "une info factuelle dans le message actuel (ex: 'j'ai un exam de maths le 15'). "
-                "Ne deduis PAS de faits a partir du contexte. Ne memorise PAS d'infos inventees. "
-                "En cas de doute, ne sauvegarde PAS.\n\n"
                 f"{TOOLS_DESCRIPTION}\n\n"
                 f"Faits memorises :\n{memory.get_facts_summary(user_id)}"
             )},
@@ -421,7 +417,79 @@ def think_and_respond(user_id: int, user_message: str) -> str:
     if not response.startswith("Tous mes fournisseurs"):
         memory.save_message(user_id, "assistant", response)
 
+    # 6. Extraction de faits (phase séparée, ne bloque pas la réponse)
+    try:
+        _extract_facts(user_id, user_message)
+    except Exception as e:
+        logger.warning("Extraction de faits echouee : %s", e)
+
     return response
+
+
+# ── Extraction automatique de faits ──────────────────────
+
+def _extract_facts(user_id: int, user_message: str) -> None:
+    """
+    Phase séparée d'extraction de faits.
+    Analyse le dernier message de l'utilisateur et sauvegarde tout fait
+    explicitement mentionné (exam, deadline, préférence, info perso...).
+    """
+    existing_facts = memory.get_facts_summary(user_id)
+
+    extract_messages = [
+        {"role": "system", "content": (
+            "Tu es un extracteur de faits. Ton SEUL role est d'identifier les infos factuelles "
+            "que l'utilisateur mentionne EXPLICITEMENT dans son message.\n\n"
+            "Exemples de faits a extraire :\n"
+            "- 'j'ai un exam de maths vendredi' → {\"facts\": [{\"category\": \"exam\", \"key\": \"maths\", \"value\": \"vendredi\"}]}\n"
+            "- 'je m'appelle Thomas' → {\"facts\": [{\"category\": \"identite\", \"key\": \"prenom\", \"value\": \"Thomas\"}]}\n"
+            "- 'je suis en L2 info' → {\"facts\": [{\"category\": \"etudes\", \"key\": \"formation\", \"value\": \"L2 informatique\"}]}\n"
+            "- 'mon anniversaire c'est le 3 avril' → {\"facts\": [{\"category\": \"perso\", \"key\": \"anniversaire\", \"value\": \"3 avril\"}]}\n"
+            "- 'j'ai rendu le projet' → {\"facts\": [{\"category\": \"etudes\", \"key\": \"projet\", \"value\": \"rendu\"}]}\n"
+            "- 'salut ca va' → {\"facts\": []}\n"
+            "- 'c'est quoi la capitale du Japon' → {\"facts\": []}\n\n"
+            "REGLES :\n"
+            "- Extrais UNIQUEMENT ce que l'utilisateur dit dans SON message\n"
+            "- Ne deduis RIEN, ne suppose RIEN\n"
+            "- Si le message ne contient aucun fait personnel → {\"facts\": []}\n"
+            "- Questions, blagues, commandes = PAS de faits\n"
+            "- Evite les doublons avec les faits existants (ne re-sauvegarde pas la meme chose)\n\n"
+            f"Faits deja memorises :\n{existing_facts}\n\n"
+            "Reponds UNIQUEMENT avec un JSON valide."
+        )},
+        {"role": "user", "content": user_message},
+    ]
+
+    try:
+        raw = _call_llm(extract_messages, temperature=0.1)
+
+        # Parser le JSON
+        json_match = None
+        import re
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            json_match = match.group()
+
+        if not json_match:
+            return
+
+        parsed = json.loads(json_match)
+        facts_list = parsed.get("facts", [])
+
+        for fact in facts_list:
+            if not isinstance(fact, dict):
+                continue
+            category = fact.get("category", "general")
+            key = fact.get("key", "")
+            value = fact.get("value", "")
+            if key and value:
+                memory.save_fact(user_id, category, key, value)
+                logger.info("Fait extrait et sauvegarde : [%s] %s = %s", category, key, value)
+
+    except json.JSONDecodeError:
+        logger.debug("Extraction de faits : JSON invalide, ignore")
+    except Exception as e:
+        logger.warning("Extraction de faits echouee : %s", str(e)[:200])
 
 
 # ── Commandes spéciales ──────────────────────────────────
