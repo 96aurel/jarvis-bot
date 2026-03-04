@@ -26,6 +26,45 @@ import scraper
 logger = logging.getLogger("jarvis.brain")
 
 
+def _extract_json(text: str) -> str | None:
+    """
+    Extrait le premier objet JSON valide d'un texte, meme avec des objets imbriques.
+    Utilise le comptage de accolades pour trouver les limites exactes.
+    """
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape:
+            escape = False
+            continue
+        if c == '\\':
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                # Verifier que c'est du JSON valide
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 def _build_llm_client() -> tuple[OpenAI, str]:
     """
     Crée le client LLM selon le provider configuré.
@@ -68,6 +107,15 @@ _groq_client = OpenAI(
     api_key=config.GROQ_API_KEY,
     base_url=config.GROQ_BASE_URL,
 ) if config.GROQ_API_KEY else None
+
+# Verification critique au demarrage
+if not _gemini_client:
+    logger.error(
+        "!!! GEMINI_API_KEY MANQUANTE !!! "
+        "Sans Gemini, le bot n'a AUCUN fallback quand Groq rate-limit. "
+        "Images et fichiers ne fonctionneront pas non plus. "
+        "Ajoute GEMINI_API_KEY dans tes variables d'environnement."
+    )
 
 
 # ── Transcription audio (Whisper via Groq) ──────────────
@@ -140,11 +188,15 @@ def analyze_image(user_id: int, image_path: str, caption: str) -> str:
             memory.save_message(user_id, "user", f"[Photo] {caption}")
             memory.save_message(user_id, "assistant", result)
             return result
+        except (RateLimitError, APIStatusError) as e:
+            logger.warning("Vision rate limit sur %s : %s", model, str(e)[:200])
+            continue
         except Exception as e:
             logger.warning("Vision echouee sur %s : %s", model, str(e)[:200])
             continue
 
-    return "J'ai pas reussi a analyser cette image."
+    logger.error("Toute la vision chain a echoue. Chain : %s", [m for _, m in vision_chain])
+    return "J'arrive pas a analyser l'image la. Verifie que GEMINI_API_KEY est configure."
 
 
 # ── Chargement de l'identité ────────────────────────────
@@ -324,21 +376,15 @@ def think_and_respond(user_id: int, user_message: str) -> str:
 
         logger.info("Phase de reflexion...")
         reflection_raw = _call_llm(reflection_messages, temperature=0.3)
+        logger.info("Reflexion brute : %s", reflection_raw[:300])
 
-        # Parser le JSON de decision
-        json_match = None
-        for line in reflection_raw.split("\n"):
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
-                json_match = line
-                break
-        if not json_match:
-            match = re.search(r'\{[^{}]*(?:\[[^\]]*\][^{}]*)*\}', reflection_raw)
-            if match:
-                json_match = match.group()
+        # Parser le JSON avec extraction robuste (gere les objets imbriques)
+        json_str = _extract_json(reflection_raw)
 
-        if json_match:
-            tool_call = json.loads(json_match)
+        if json_str:
+            tool_call = json.loads(json_str)
+            logger.info("JSON parse : tool=%s, facts=%d",
+                        tool_call.get("tool", "none"), len(tool_call.get("facts", [])))
 
             # Sauvegarder les faits detectes
             for fact in tool_call.get("facts", []):
@@ -352,6 +398,8 @@ def think_and_respond(user_id: int, user_message: str) -> str:
                 tool_used = tool_call["tool"]
                 tool_result = _execute_tool(tool_call, user_id)
                 logger.info("Outil %s -> resultat (%d chars)", tool_used, len(tool_result))
+        else:
+            logger.warning("Aucun JSON valide trouve dans la reflexion")
     except Exception as e:
         logger.warning("Phase de reflexion echouee, passage direct a la reponse : %s", e)
 
