@@ -40,6 +40,12 @@ GROQ_WHISPER_MODEL: str = "whisper-large-v3"  # Pour la transcription vocale (gr
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
+# ── Google Gemini (fallback gratuit — très généreux) ─────
+# Clé API : https://aistudio.google.com/app/apikey
+GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
 # ── Chemins ──────────────────────────────────────────────
 SOUL_FILE = "soul.md"
 DATABASE_FILE = "jarvis_memory.db"

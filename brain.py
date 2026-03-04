@@ -48,6 +48,12 @@ def _build_llm_client() -> tuple[OpenAI, str]:
 
 _client, _model = _build_llm_client()
 
+# Client Gemini (fallback gratuit quand Groq est limité)
+_gemini_client = OpenAI(
+    api_key=config.GEMINI_API_KEY,
+    base_url=config.GEMINI_BASE_URL,
+) if config.GEMINI_API_KEY else None
+
 # Client Groq séparé pour Whisper (toujours Groq, même si le LLM est OpenAI)
 _groq_client = OpenAI(
     api_key=config.GROQ_API_KEY,
@@ -208,54 +214,48 @@ def _build_system_prompt(user_id: int) -> str:
 
 def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
     """
-    Appelle l'API LLM avec gestion du rate limit :
-      1. Essaie avec le mod\u00e8le principal
-      2. Si rate limit (429) + provider Groq -> fallback sur le mod\u00e8le l\u00e9ger
-      3. Si \u00e7a \u00e9choue encore -> attend et r\u00e9essaie une fois
+    Appelle l'API LLM avec cha\u00eene de fallback :
+      1. Mod\u00e8le principal (Groq 70B)
+      2. Mod\u00e8le l\u00e9ger Groq (8B)
+      3. Google Gemini (fallback gratuit, limites \u00e9normes)
     """
-    models_to_try = [_model]
+    # Construire la cha\u00eene : [(client, model), ...]
+    chain: list[tuple[OpenAI, str]] = [(_client, _model)]
 
-    # Ajouter le fallback Groq si disponible
+    # Fallback Groq (mod\u00e8le l\u00e9ger)
     if config.LLM_PROVIDER.lower() == "groq" and config.GROQ_FALLBACK_MODEL != _model:
-        models_to_try.append(config.GROQ_FALLBACK_MODEL)
+        chain.append((_client, config.GROQ_FALLBACK_MODEL))
 
-    for model in models_to_try:
+    # Fallback Gemini (toujours en dernier recours)
+    if _gemini_client:
+        chain.append((_gemini_client, config.GEMINI_MODEL))
+
+    for i, (client, model) in enumerate(chain):
         try:
-            response = _client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=1500,
             )
-            if model != _model:
-                logger.info("Reponse via modele fallback : %s", model)
+            if i > 0:
+                logger.info("Reponse via fallback #%d : %s", i, model)
             return response.choices[0].message.content.strip()
 
         except RateLimitError as e:
-            logger.warning("Rate limit sur %s : %s", model, e)
-
-            # Si c'est le dernier modele, attendre et reessayer
-            if model == models_to_try[-1]:
-                logger.info("Attente de 15s avant dernier essai...")
-                time.sleep(15)
-                try:
-                    response = _client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=800,  # Moins de tokens pour passer
-                    )
-                    return response.choices[0].message.content.strip()
-                except RateLimitError:
-                    return (
-                        "J'ai atteint ma limite de tokens pour aujourd'hui. "
-                        "Reessaie dans quelques minutes, ou demain pour un reset complet. "
-                        "Desole pour la gene !"
-                    )
-            # Sinon on passe au modele suivant
+            logger.warning("Rate limit sur %s : %s", model, str(e)[:150])
+            # Passer au suivant dans la cha\u00eene
             continue
 
-    return "Erreur inattendue lors de l'appel au LLM."
+        except Exception as e:
+            logger.error("Erreur LLM sur %s : %s", model, str(e)[:150])
+            continue
+
+    # Tous les fournisseurs ont \u00e9chou\u00e9
+    return (
+        "Tous mes fournisseurs d'IA sont temporairement indisponibles. "
+        "Reessaie dans quelques minutes !"
+    )
 
 
 # ── Boucle de réflexion principale ──────────────────────
