@@ -242,21 +242,21 @@ def handle_command(user_id: int, command: str) -> str | None:
 
     if cmd == "/start":
         return (
-            "👋 Bonjour ! Je suis **Jarvis**, ton assistant personnel.\n\n"
+            "Bonjour ! Je suis Jarvis, ton assistant personnel.\n\n"
             "Tu peux me parler naturellement ou utiliser ces commandes :\n"
-            "• `/clear` — Effacer l'historique\n"
-            "• `/facts` — Voir ce que j'ai mémorisé\n"
-            "• `/search <requête>` — Rechercher sur le web\n"
-            "• `/forget <clé>` — Oublier un fait\n"
+            "/clear - Effacer l'historique\n"
+            "/facts - Voir ce que j'ai mémorisé\n"
+            "/search <requête> - Rechercher sur le web\n"
+            "/forget <clé> - Oublier un fait\n"
         )
 
     elif cmd == "/clear":
         n = memory.clear_history(user_id)
-        return f"🧹 Historique effacé ({n} messages supprimés)."
+        return f"Historique effacé ({n} messages supprimés)."
 
     elif cmd == "/facts":
         summary = memory.get_facts_summary(user_id)
-        return f"📋 **Faits mémorisés :**\n\n{summary}"
+        return f"Faits mémorisés :\n\n{summary}"
 
     elif cmd == "/search" and arg:
         result = scraper.search_and_summarize(arg)

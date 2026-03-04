@@ -14,6 +14,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ContextTypes,
+    Defaults,
     filters,
 )
 
@@ -125,7 +126,8 @@ def run_bot() -> None:
     """Configure et lance le bot Telegram."""
     logger.info("Démarrage du bot Telegram…")
 
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    defaults = Defaults(parse_mode=None)
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).defaults(defaults).build()
 
     # Commandes
     for cmd in ["start", "clear", "facts", "search", "forget"]:
