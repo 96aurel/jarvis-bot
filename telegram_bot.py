@@ -95,21 +95,9 @@ def _escape_markdown(text: str) -> str:
 
 
 async def _safe_reply(message, text: str) -> None:
-    """
-    Envoie un message en Markdown. Si Telegram refuse le formatage,
-    nettoie le Markdown et renvoie en texte brut.
-    """
+    """Envoie un message en texte brut (pas de parse_mode = pas d'erreur Markdown)."""
     for chunk in _split_message(text):
-        try:
-            await message.reply_text(chunk, parse_mode="Markdown")
-        except Exception:
-            logger.warning("Markdown invalide, renvoi en texte brut.")
-            try:
-                clean = _escape_markdown(chunk)
-                await message.reply_text(clean)
-            except Exception:
-                # Dernier recours : envoyer tel quel
-                await message.reply_text(chunk[:4000])
+        await message.reply_text(chunk)
 
 
 def _split_message(text: str, max_len: int = 4000) -> list[str]:
