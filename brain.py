@@ -88,6 +88,21 @@ def _build_llm_client() -> tuple[OpenAI, str]:
 
 _client, _model = _build_llm_client()
 
+# Client Ollama (local, illimite, prioritaire si active)
+_ollama_client = None
+try:
+    if config.OLLAMA_ENABLED:
+        _ollama_client = OpenAI(
+            api_key="ollama",  # Ollama n'a pas besoin de cle mais le SDK en veut une
+            base_url=config.OLLAMA_BASE_URL,
+        )
+        # Test rapide pour verifier que Ollama tourne
+        _ollama_client.models.list()
+        logger.info("Ollama connecte : %s @ %s", config.OLLAMA_MODEL, config.OLLAMA_BASE_URL)
+except Exception as e:
+    logger.warning("Ollama non disponible (%s) — sera ignore dans la chaine", str(e)[:100])
+    _ollama_client = None
+
 # Client Gemini (fallback gratuit quand Groq est limite)
 try:
     _gemini_client = OpenAI(
@@ -288,15 +303,22 @@ Date/heure : {{datetime}}
 
 def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
     """
-    Appelle l'API LLM avec cha\u00eene de fallback :
-      1. Mod\u00e8le principal (Groq 70B)
-      2. Mod\u00e8le l\u00e9ger Groq (8B)
-      3. Google Gemini (fallback gratuit, limites \u00e9normes)
+    Appelle l'API LLM avec chaine de fallback :
+      1. Ollama (local, illimite) — si actif
+      2. Groq 70B (rapide, gratuit mais limite)
+      3. Google Gemini (fallback gratuit, limites enormes)
     """
-    # Construire la cha\u00eene : [(client, model), ...]
-    chain: list[tuple[OpenAI, str]] = [(_client, _model)]
+    # Construire la chaine : [(client, model), ...]
+    chain: list[tuple[OpenAI, str]] = []
 
-    # Fallback Gemini (dernier recours — gratuit et fiable)
+    # Ollama en premier si disponible
+    if _ollama_client:
+        chain.append((_ollama_client, config.OLLAMA_MODEL))
+
+    # Provider principal (Groq ou OpenAI)
+    chain.append((_client, _model))
+
+    # Fallback Gemini (dernier recours)
     if _gemini_client:
         chain.append((_gemini_client, config.GEMINI_MODEL))
 

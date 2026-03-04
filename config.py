@@ -29,6 +29,13 @@ ALLOWED_USER_IDS: list[int] = [
 # Choix du fournisseur : "groq" (gratuit & rapide) ou "openai"
 LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "groq")
 
+# ── Ollama (local, illimité) ──────────────────────────────
+# Installer : https://ollama.com  puis `ollama pull qwen3:4b`
+# Si OLLAMA_BASE_URL est defini, Ollama sera en PRIORITE dans la chaine
+OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
+OLLAMA_ENABLED: bool = os.environ.get("OLLAMA_ENABLED", "false").lower() in ("true", "1", "yes")
+
 # ── Groq (recommandé — gratuit) ─────────────────────────
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
