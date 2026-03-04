@@ -327,13 +327,18 @@ def think_and_respond(user_id: int, user_message: str) -> str:
     # ── Phase de RÉFLEXION (skip si rate limited)────────
     # On tente la réflexion mais si ça échoue, on passe directement à la réponse
     tool_result = ""
+    tool_used = None  # Nom de l'outil utilisé (ou None)
     try:
         reflection_messages = [
             {"role": "system", "content": (
-                "Tu es l'agent de réflexion de Jarvis. "
-                "Analyse le message de l'utilisateur et décide si tu dois utiliser un outil.\n\n"
+                "Tu es l'agent de reflexion de Jarvis. "
+                "Analyse le message de l'utilisateur et decide si tu dois utiliser un outil.\n\n"
+                "IMPORTANT : N'utilise web_search QUE si l'utilisateur demande une info "
+                "que tu ne connais PAS avec certitude (actualites, paroles de chansons, "
+                "prix actuels, resultats sportifs, etc.). "
+                "Si tu peux repondre de memoire avec certitude, utilise {\"tool\": \"none\"}.\n\n"
                 f"{TOOLS_DESCRIPTION}\n\n"
-                f"Faits mémorisés :\n{memory.get_facts_summary(user_id)}"
+                f"Faits memorises :\n{memory.get_facts_summary(user_id)}"
             )},
             *history[-6:],
         ]
@@ -357,8 +362,9 @@ def think_and_respond(user_id: int, user_message: str) -> str:
         if json_match:
             tool_call = json.loads(json_match)
             if tool_call.get("tool") and tool_call["tool"] != "none":
+                tool_used = tool_call["tool"]
                 tool_result = _execute_tool(tool_call, user_id)
-                logger.info("Resultat de l'outil (%d caracteres)", len(tool_result))
+                logger.info("Outil %s → resultat (%d caracteres)", tool_used, len(tool_result))
     except Exception as e:
         logger.warning("Phase de reflexion echouee, passage direct a la reponse : %s", e)
 
@@ -379,8 +385,23 @@ def think_and_respond(user_id: int, user_message: str) -> str:
         response_messages.append({
             "role": "system",
             "content": (
-                f"[Résultat de recherche / outil]\n\n{tool_result}\n\n"
-                "Utilise ces informations pour enrichir ta réponse."
+                f"[OUTIL UTILISE : {tool_used}]\n\n"
+                f"Voici les VRAIS resultats obtenus :\n\n{tool_result}\n\n"
+                "Base ta reponse UNIQUEMENT sur ces resultats. "
+                "Si les resultats sont vides ou insuffisants, dis-le honnetement. "
+                "Ne complete PAS avec des informations inventees."
+            ),
+        })
+    else:
+        response_messages.append({
+            "role": "system",
+            "content": (
+                "[AUCUN OUTIL UTILISE]\n\n"
+                "Tu n'as PAS fait de recherche web pour cette reponse. "
+                "Ne dis PAS que tu as cherche sur internet ou que tu as trouve quelque chose en ligne. "
+                "Reponds uniquement avec ce que tu sais de memoire. "
+                "Si tu n'es pas sur d'une info, dis clairement que tu ne sais pas "
+                "et propose de faire une recherche web."
             ),
         })
 

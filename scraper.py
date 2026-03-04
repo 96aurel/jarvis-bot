@@ -116,22 +116,41 @@ def scrape_url(url: str, max_chars: int | None = None) -> str:
 
 def search_and_summarize(query: str) -> str:
     """
-    Recherche sur le web et extrait le contenu de la première page pertinente.
-    Retourne un texte prêt à être injecté dans le prompt du LLM.
+    Recherche sur le web et extrait le contenu des pages pertinentes.
+    Retourne un texte pret a etre injecte dans le prompt du LLM.
     """
-    results = web_search(query, num_results=3)
+    results = web_search(query, num_results=5)
     if not results:
-        return "Aucun résultat trouvé pour cette recherche."
+        return f"[RECHERCHE ECHOUEE] Aucun resultat trouve pour : {query}"
 
-    output_parts = [f"**Résultats pour : « {query} »**\n"]
+    output_parts = [f"Resultats de recherche pour : {query}\n"]
 
     for i, r in enumerate(results, 1):
-        output_parts.append(f"{i}. [{r['title']}]({r['url']})")
-        output_parts.append(f"   {r['snippet']}\n")
+        output_parts.append(f"{i}. {r['title']}")
+        output_parts.append(f"   URL: {r['url']}")
+        if r['snippet']:
+            output_parts.append(f"   Resume: {r['snippet']}")
+        output_parts.append("")
 
-    # Extraire le contenu du premier résultat
-    if results[0]["url"]:
-        content = scrape_url(results[0]["url"], max_chars=2000)
-        output_parts.append(f"\n**Extrait du premier résultat :**\n{content}")
+    # Extraire le contenu des 2 premieres pages (pas juste la premiere)
+    extracted = 0
+    for r in results[:3]:
+        url = r.get("url", "")
+        if not url or url.startswith("#"):
+            continue
+        try:
+            content = scrape_url(url, max_chars=2500)
+            if content and not content.startswith("[Erreur"):
+                output_parts.append(f"--- Contenu de : {r['title']} ---")
+                output_parts.append(content)
+                output_parts.append("")
+                extracted += 1
+                if extracted >= 2:
+                    break
+        except Exception as e:
+            logger.warning("Echec extraction %s : %s", url, e)
+
+    if extracted == 0:
+        output_parts.append("[Aucun contenu de page n'a pu etre extrait, seuls les snippets sont disponibles]")
 
     return "\n".join(output_parts)
