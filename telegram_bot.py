@@ -80,17 +80,36 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ── Utilitaires ──────────────────────────────────────────
 
+def _escape_markdown(text: str) -> str:
+    """Supprime les caractères Markdown problématiques pour un envoi en texte brut."""
+    # Remplace les marqueurs Markdown par leur version lisible
+    import re
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)   # **bold** → bold
+    text = re.sub(r'\*(.+?)\*', r'\1', text)         # *italic* → italic
+    text = re.sub(r'__(.+?)__', r'\1', text)          # __underline__
+    text = re.sub(r'_(.+?)_', r'\1', text)            # _italic_
+    text = re.sub(r'`{3}[\s\S]*?`{3}', '', text)     # ```code blocks```
+    text = re.sub(r'`(.+?)`', r'\1', text)            # `inline code`
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)  # [link](url) → link
+    return text
+
+
 async def _safe_reply(message, text: str) -> None:
     """
-    Envoie un message en Markdown. Si Telegram refuse le formatage
-    (caractères Markdown mal fermés), renvoie en texte brut.
+    Envoie un message en Markdown. Si Telegram refuse le formatage,
+    nettoie le Markdown et renvoie en texte brut.
     """
     for chunk in _split_message(text):
         try:
             await message.reply_text(chunk, parse_mode="Markdown")
-        except BadRequest:
+        except Exception:
             logger.warning("Markdown invalide, renvoi en texte brut.")
-            await message.reply_text(chunk)
+            try:
+                clean = _escape_markdown(chunk)
+                await message.reply_text(clean)
+            except Exception:
+                # Dernier recours : envoyer tel quel
+                await message.reply_text(chunk[:4000])
 
 
 def _split_message(text: str, max_len: int = 4000) -> list[str]:
