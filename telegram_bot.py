@@ -2,14 +2,16 @@
 telegram_bot.py — Interface Telegram pour Jarvis.
 
 Comportement naturel :
-  - Pas de message "je réfléchis" — juste typing comme une vraie personne
+  - Multi-bulles : Jarvis envoie plusieurs messages courts avec typing entre chaque
+  - Le LLM utilise ||| pour séparer les bulles
   - Batching : accumule les messages rapides et répond à tout d'un coup
-  - Reply sélectif : cite un message spécifique quand c'est pertinent
-  - Vocaux et photos supportés
+  - Messages différés : "rappelle-moi dans 5min" fonctionne
+  - Vocaux, photos et fichiers supportés
 """
 
 import asyncio
 import logging
+import random
 import re
 import tempfile
 from collections import defaultdict
@@ -40,6 +42,8 @@ _message_buffers: dict[int, list[dict]] = defaultdict(list)
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 # Timers actifs par utilisateur
 _batch_timers: dict[int, asyncio.Task] = {}
+# Référence globale à l'Application (pour les messages différés)
+_app: Application | None = None
 
 # Extensions de fichiers texte supportés
 _TEXT_EXTENSIONS = {
@@ -128,7 +132,15 @@ async def _process_batch_after_delay(user_id: int, chat, context) -> None:
                 response = "Desole, j'ai eu un souci. Reessaie."
             finally:
                 typing_task.cancel()
-            await _safe_reply(buffered[0]["message"], response, quote=True)
+
+            # Vérifier si le LLM a programmé un rappel
+            response, reminder = _extract_reminder(response)
+            if reminder:
+                asyncio.create_task(
+                    _schedule_reminder(chat.id, user_id, reminder["delay"], reminder["text"])
+                )
+
+            await _send_natural(chat, buffered[0]["message"], response)
         else:
             # Plusieurs messages — réponse individuelle à chacun (quote séparé)
             logger.info("Batch de %d messages pour user %d", len(buffered), user_id)
@@ -151,15 +163,21 @@ async def _process_batch_after_delay(user_id: int, chat, context) -> None:
             finally:
                 typing_task.cancel()
 
+            # Vérifier rappels
+            response, reminder = _extract_reminder(response)
+            if reminder:
+                asyncio.create_task(
+                    _schedule_reminder(chat.id, user_id, reminder["delay"], reminder["text"])
+                )
+
             # Parser les réponses individuelles [R1], [R2], etc.
             replies = _parse_batch_response(response, len(buffered))
             if replies:
-                for msg_idx, text in replies:
+                for msg_idx, reply_text in replies:
                     target = buffered[msg_idx]["message"] if 0 <= msg_idx < len(buffered) else buffered[-1]["message"]
-                    await _safe_reply(target, text, quote=True)
+                    await _send_natural(chat, target, reply_text)
             else:
-                # Parsing échoué — envoyer tout au dernier message
-                await _safe_reply(buffered[-1]["message"], response, quote=True)
+                await _send_natural(chat, buffered[-1]["message"], response)
 
 
 def _parse_batch_response(response: str, num_messages: int) -> list[tuple[int, str]] | None:
@@ -214,7 +232,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         finally:
             typing_task.cancel()
 
-        await _safe_reply(update.message, response, quote=True)
+        await _send_natural(update.message.chat, update.message, response)
 
     except Exception as e:
         logger.exception("Erreur traitement vocal : %s", e)
@@ -246,7 +264,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             typing_task.cancel()
 
         Path(tmp_path).unlink(missing_ok=True)
-        await _safe_reply(update.message, response, quote=True)
+        await _send_natural(update.message.chat, update.message, response)
 
     except Exception as e:
         logger.exception("Erreur photo : %s", e)
@@ -307,7 +325,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         finally:
             typing_task.cancel()
 
-        await _safe_reply(update.message, response, quote=True)
+        await _send_natural(update.message.chat, update.message, response)
 
     except Exception as e:
         logger.exception("Erreur document : %s", e)
@@ -355,7 +373,46 @@ async def _keep_typing(chat, interval: float = 4.0) -> None:
         pass
 
 
+async def _send_natural(chat, reply_to_msg: Message, text: str) -> None:
+    """
+    Envoie la réponse de manière naturelle :
+    - Si le LLM a utilisé ||| pour séparer des bulles, envoie chaque bulle
+      séparément avec un délai de typing entre chaque.
+    - La première bulle est en reply (quote), les suivantes sont "libres".
+    - Chaque bulle est précédée d'un typing ~0.5-1.5s (simule la frappe).
+    """
+    # Séparer en bulles
+    bubbles = [b.strip() for b in text.split("|||") if b.strip()]
+    if not bubbles:
+        return
+
+    for i, bubble in enumerate(bubbles):
+        # Chaque bulle peut être longue — on la découpe si besoin
+        chunks = _split_message(bubble)
+        for j, chunk in enumerate(chunks):
+            # Typing avant d'envoyer (sauf la toute première bulle)
+            if i > 0 or j > 0:
+                # Simule le temps de frappe : proportionnel à la longueur, capé à 3s
+                delay = min(0.5 + len(chunk) * 0.008, 3.0)
+                await chat.send_action("typing")
+                await asyncio.sleep(delay)
+
+            kwargs = {}
+            # Seule la première bulle est en reply (quote)
+            if i == 0 and j == 0:
+                kwargs["reply_to_message_id"] = reply_to_msg.message_id
+
+            try:
+                await chat.send_message(text=chunk, **kwargs)
+            except Exception:
+                try:
+                    await chat.send_message(text=chunk)
+                except Exception:
+                    pass
+
+
 async def _safe_reply(message: Message, text: str, quote: bool = False) -> None:
+    """Envoi simple sans multi-bulles (utilisé pour les commandes)."""
     for chunk in _split_message(text):
         kwargs = {}
         if quote:
@@ -385,22 +442,54 @@ def _split_message(text: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
+# ── Messages différés (rappels) ────────────────────────────
+
+def _extract_reminder(text: str) -> tuple[str, dict | None]:
+    """
+    Détecte un marqueur [REMIND:Xs:message] dans la réponse du LLM.
+    Retourne (texte_nettoyé, {"delay": seconds, "text": message}) ou (texte, None).
+    """
+    match = re.search(r'\[REMIND:(\d+)s:(.+?)\]', text)
+    if not match:
+        return text, None
+    delay = int(match.group(1))
+    reminder_text = match.group(2).strip()
+    cleaned = text[:match.start()] + text[match.end():]
+    cleaned = cleaned.strip()
+    return cleaned, {"delay": delay, "text": reminder_text}
+
+
+async def _schedule_reminder(chat_id: int, user_id: int, delay_seconds: int, text: str) -> None:
+    """Envoie un message après un délai."""
+    logger.info("Rappel programme dans %ds : %s", delay_seconds, text[:80])
+    await asyncio.sleep(delay_seconds)
+    try:
+        if _app and _app.bot:
+            await _app.bot.send_action(chat_id=chat_id, action="typing")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await _app.bot.send_message(chat_id=chat_id, text=text)
+            logger.info("Rappel envoye.")
+    except Exception as e:
+        logger.error("Erreur envoi rappel : %s", e)
+
+
 # ── Lancement du bot ─────────────────────────────────────
 
 def run_bot() -> None:
+    global _app
     logger.info("Demarrage du bot Telegram...")
 
     defaults = Defaults(parse_mode=None)
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).defaults(defaults).build()
+    _app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).defaults(defaults).build()
 
     for cmd in ["start", "clear", "facts", "search", "forget"]:
-        app.add_handler(CommandHandler(cmd, handle_command))
+        _app.add_handler(CommandHandler(cmd, handle_command))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_error_handler(error_handler)
+    _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    _app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    _app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    _app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    _app.add_error_handler(error_handler)
 
     logger.info("Bot pret !")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    _app.run_polling(allowed_updates=Update.ALL_TYPES)

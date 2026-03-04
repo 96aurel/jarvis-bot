@@ -174,6 +174,10 @@ Tu disposes des outils suivants que tu peux décider d'utiliser AVANT de répond
 4. **delete_fact** : Oublier un fait précédemment mémorisé.
    Usage : {"tool": "delete_fact", "key": "math_exam"}
 
+5. **remind_me** : Programmer un message a envoyer plus tard (rappel/timer).
+   Usage : {"tool": "remind_me", "delay_seconds": 300, "message": "Eh c'est l'heure de bosser !"}
+   L'utilisateur peut dire "dans 5 min", "dans 1h", "dans 30 secondes", etc.
+
 Si tu as besoin d'un outil, réponds UNIQUEMENT avec un JSON valide contenant "tool" et ses paramètres.
 Si tu n'as besoin d'aucun outil, réponds avec : {"tool": "none"}
 """
@@ -207,6 +211,13 @@ def _execute_tool(tool_call: dict, user_id: int) -> str:
         logger.info("🗑️ Fait supprimé : %s (trouvé=%s)", key, deleted)
         return f"Fait '{key}' {'supprimé' if deleted else 'non trouvé'}."
 
+    elif tool_name == "remind_me":
+        delay = tool_call.get("delay_seconds", 300)
+        msg = tool_call.get("message", "Hey, c'est ton rappel !")
+        logger.info("Rappel programme dans %ds : %s", delay, msg[:80])
+        # Marqueur spécial que telegram_bot.py va détecter
+        return f"__REMINDER_SET__|{delay}|{msg}"
+
     return ""
 
 
@@ -219,7 +230,7 @@ def _build_system_prompt(user_id: int) -> str:
 
 ---
 
-## Faits mémorisés sur l'utilisateur
+## Faits memorises sur l'utilisateur
 
 {facts_summary}
 
@@ -228,6 +239,18 @@ def _build_system_prompt(user_id: int) -> str:
 ## Date et heure actuelles
 
 {{datetime}}
+
+---
+
+## Format de reponse
+
+Quand tu veux envoyer plusieurs messages separes (comme un vrai humain sur Telegram), utilise ||| pour separer les bulles.
+Exemple : "Salut !|||Ca va ? J'ai regarde ton truc|||En gros c'est ca..."
+Le separateur ||| cree un nouveau message avec un petit delai de frappe entre chaque — ca fait naturel.
+N'abuse pas : 1-3 bulles max en general. Parfois une seule bulle suffit.
+
+Si tu dois programmer un rappel, inclus le marqueur [REMIND:Xs:message] dans ta reponse.
+Exemple : "Ok je te rappelle dans 5 min ![REMIND:300s:Eh, c'est l'heure de bosser sur ton projet !]"
 """
 
 
@@ -340,6 +363,13 @@ def think_and_respond(user_id: int, user_message: str) -> str:
         logger.warning("Phase de reflexion echouee, passage direct a la reponse : %s", e)
 
     # ── Phase de RÉPONSE ────────────────────────────────
+    # Gérer le cas spécial d'un rappel programmé via outil
+    reminder_info = None
+    if tool_result and tool_result.startswith("__REMINDER_SET__"):
+        _, delay_str, remind_msg = tool_result.split("|", 2)
+        reminder_info = (int(delay_str), remind_msg)
+        tool_result = f"Rappel programme dans {int(delay_str)//60} minute(s) : \"{remind_msg}\". Confirme a l'utilisateur."
+
     response_messages = [
         {"role": "system", "content": system_prompt},
         *history,
@@ -356,6 +386,11 @@ def think_and_respond(user_id: int, user_message: str) -> str:
 
     logger.info("Generation de la reponse...")
     response = _call_llm(response_messages)
+
+    # Injecter le marqueur de rappel pour que telegram_bot.py le détecte
+    if reminder_info:
+        delay, msg = reminder_info
+        response += f"\n[REMIND:{delay}s:{msg}]"
 
     # 5. Sauvegarder la réponse (seulement si c'est une vraie reponse)
     if not response.startswith("Tous mes fournisseurs"):
