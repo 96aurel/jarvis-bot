@@ -143,7 +143,7 @@ async def _process_batch_after_delay(user_id: int, chat, context) -> None:
             if reaction:
                 await _react(buffered[0]["message"], reaction)
 
-            await _send_natural(chat, buffered[0]["message"], response)
+            await _send_natural(chat, buffered[0]["message"], response, reply_to=False)
         else:
             logger.info("Batch de %d messages pour user %d", len(buffered), user_id)
             parts = []
@@ -180,9 +180,9 @@ async def _process_batch_after_delay(user_id: int, chat, context) -> None:
             if replies:
                 for msg_idx, reply_text in replies:
                     target = buffered[msg_idx]["message"] if 0 <= msg_idx < len(buffered) else buffered[-1]["message"]
-                    await _send_natural(chat, target, reply_text)
+                    await _send_natural(chat, target, reply_text, reply_to=True)
             else:
-                await _send_natural(chat, buffered[-1]["message"], response)
+                await _send_natural(chat, buffered[-1]["message"], response, reply_to=False)
 
 
 def _parse_batch_response(response: str, num_messages: int) -> list[tuple[int, str]] | None:
@@ -242,7 +242,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         response, reaction = _extract_reaction(response)
         if reaction:
             await _react(update.message, reaction)
-        await _send_natural(update.message.chat, update.message, response)
+        await _send_natural(update.message.chat, update.message, response, reply_to=True)
 
     except Exception as e:
         logger.exception("Erreur traitement vocal : %s", e)
@@ -279,7 +279,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         response, reaction = _extract_reaction(response)
         if reaction:
             await _react(update.message, reaction)
-        await _send_natural(update.message.chat, update.message, response)
+        await _send_natural(update.message.chat, update.message, response, reply_to=True)
 
     except Exception as e:
         logger.exception("Erreur photo : %s", e)
@@ -345,7 +345,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         response, reaction = _extract_reaction(response)
         if reaction:
             await _react(update.message, reaction)
-        await _send_natural(update.message.chat, update.message, response)
+        await _send_natural(update.message.chat, update.message, response, reply_to=True)
 
     except Exception as e:
         logger.exception("Erreur document : %s", e)
@@ -414,12 +414,12 @@ async def _keep_typing(chat, interval: float = 4.0) -> None:
         pass
 
 
-async def _send_natural(chat, reply_to_msg: Message, text: str) -> None:
+async def _send_natural(chat, reply_to_msg: Message, text: str, reply_to: bool = False) -> None:
     """
     Envoie la reponse de maniere naturelle :
     - Si le LLM a utilise ||| -> bulles separees avec typing entre chaque
     - Typing AVANT chaque bulle (y compris la premiere)
-    - La premiere bulle est en reply, les suivantes libres
+    - reply_to=True : premiere bulle en reply, sinon messages libres
     """
     bubbles = [b.strip() for b in text.split("|||") if b.strip()]
     if not bubbles:
@@ -437,7 +437,7 @@ async def _send_natural(chat, reply_to_msg: Message, text: str) -> None:
             await asyncio.sleep(delay)
 
             kwargs = {}
-            if i == 0 and j == 0:
+            if i == 0 and j == 0 and reply_to:
                 kwargs["reply_to_message_id"] = reply_to_msg.message_id
 
             try:

@@ -12,11 +12,12 @@ Architecture :
 
 import json
 import logging
+import re
 import base64
 import time
 from pathlib import Path
 
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, RateLimitError, APIStatusError
 
 import config
 import memory
@@ -118,12 +119,12 @@ def analyze_image(user_id: int, image_path: str, caption: str) -> str:
         ]},
     ]
 
-    # Chaîne de fallback vision : Groq vision → Gemini → modèle principal
+    # Chaîne de fallback vision : Gemini (meilleur + pas de rate limit) → Groq → principal
     vision_chain: list[tuple[OpenAI, str]] = []
-    if config.GROQ_API_KEY and config.GROQ_VISION_MODEL:
-        vision_chain.append((_groq_client or _client, config.GROQ_VISION_MODEL))
     if _gemini_client:
         vision_chain.append((_gemini_client, config.GEMINI_MODEL))
+    if config.GROQ_API_KEY and config.GROQ_VISION_MODEL:
+        vision_chain.append((_groq_client or _client, config.GROQ_VISION_MODEL))
     vision_chain.append((_client, _model))  # Dernier recours
 
     for i, (client, model) in enumerate(vision_chain):
@@ -160,26 +161,20 @@ def load_soul() -> str:
 # ── Outils disponibles ──────────────────────────────────
 
 TOOLS_DESCRIPTION = """
-Tu disposes des outils suivants que tu peux décider d'utiliser AVANT de répondre :
+Outils disponibles :
+1. web_search : {"tool": "web_search", "query": "ta recherche"}
+2. scrape_url : {"tool": "scrape_url", "url": "https://..."}
+3. delete_fact : {"tool": "delete_fact", "key": "nom_du_fait"}
+4. remind_me : {"tool": "remind_me", "delay_seconds": 300, "message": "Ton rappel"}
 
-1. **web_search** : Rechercher des informations sur internet.
-   Usage : {"tool": "web_search", "query": "ta recherche ici"}
+Reponds UNIQUEMENT avec un JSON valide.
+Ajoute TOUJOURS un champ "facts" listant les faits personnels EXPLICITES du message.
 
-2. **scrape_url** : Extraire le contenu d'une page web spécifique.
-   Usage : {"tool": "scrape_url", "url": "https://example.com"}
-
-3. **save_fact** : Mémoriser un fait important sur l'utilisateur.
-   Usage : {"tool": "save_fact", "category": "exam", "key": "math_exam", "value": "15 mars 2026"}
-
-4. **delete_fact** : Oublier un fait précédemment mémorisé.
-   Usage : {"tool": "delete_fact", "key": "math_exam"}
-
-5. **remind_me** : Programmer un message a envoyer plus tard (rappel/timer).
-   Usage : {"tool": "remind_me", "delay_seconds": 300, "message": "Eh c'est l'heure de bosser !"}
-   L'utilisateur peut dire "dans 5 min", "dans 1h", "dans 30 secondes", etc.
-
-Si tu as besoin d'un outil, réponds UNIQUEMENT avec un JSON valide contenant "tool" et ses paramètres.
-Si tu n'as besoin d'aucun outil, réponds avec : {"tool": "none"}
+Exemples :
+{"tool": "none", "facts": []}
+{"tool": "web_search", "query": "score PSG", "facts": []}
+{"tool": "none", "facts": [{"category": "exam", "key": "maths", "value": "vendredi 15"}]}
+{"tool": "web_search", "query": "...", "facts": [{"category": "perso", "key": "prenom", "value": "Thomas"}]}
 """
 
 
@@ -229,32 +224,13 @@ def _build_system_prompt(user_id: int) -> str:
     return f"""{soul}
 
 ---
+Faits memorises : {facts_summary}
+Date/heure : {{datetime}}
 
-## Faits memorises sur l'utilisateur
-
-{facts_summary}
-
----
-
-## Date et heure actuelles
-
-{{datetime}}
-
----
-
-## Format de reponse
-
-Quand tu veux envoyer plusieurs messages separes (comme un vrai humain sur Telegram), utilise ||| pour separer les bulles.
-Exemple : "Salut !|||Ca va ? J'ai regarde ton truc|||En gros c'est ca..."
-Le separateur ||| cree un nouveau message avec un petit delai de frappe entre chaque — ca fait naturel.
-N'abuse pas : 1-3 bulles max en general. Parfois une seule bulle suffit.
-
-Si tu dois programmer un rappel, inclus le marqueur [REMIND:Xs:message] dans ta reponse.
-Exemple : "Ok je te rappelle dans 5 min [REMIND:300s:Eh, c'est l'heure de bosser sur ton projet !]"
-
-Si tu veux reagir au message de l'utilisateur avec un emoji (parce que c'est drole, impressionnant, etc.),
-ajoute [REACT:emoji] dans ta reponse. Exemples : [REACT:😂] [REACT:🔥] [REACT:💀] [REACT:❤️]
-Fais-le de temps en temps quand c'est motive, pas a chaque message.
+## Format
+- Par DEFAUT envoie UN SEUL message. Le ||| pour separer en bulles est RARE (1 fois sur 5 max). La majorite de tes reponses = une seule bulle.
+- Rappel : [REMIND:Xs:message] ex: [REMIND:300s:C'est l'heure !]
+- Reaction emoji (rare, quand c'est motive) : [REACT:emoji] ex: [REACT:😂]
 """
 
 
@@ -285,15 +261,18 @@ def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
                 logger.info("Reponse via fallback #%d : %s", i, model)
             return response.choices[0].message.content.strip()
 
-        except RateLimitError as e:
-            logger.warning("Rate limit sur %s : %s", model, str(e)[:200])
+        except (RateLimitError, APIStatusError) as e:
+            status = getattr(e, 'status_code', 429)
+            logger.warning("Rate limit/API error (%s) sur %s : %s", status, model, str(e)[:200])
             continue
 
         except Exception as e:
             logger.error("Erreur LLM sur %s : %s", model, str(e)[:200])
             continue
 
-    # Tous les fournisseurs ont \u00e9chou\u00e9
+    # Tous les fournisseurs ont echoue
+    logger.error("AUCUN fournisseur LLM disponible. Chain testee : %s",
+                 [m for _, m in chain])
     return (
         "Tous mes fournisseurs d'IA sont temporairement indisponibles. "
         "Reessaie dans quelques minutes !"
@@ -324,29 +303,29 @@ def think_and_respond(user_id: int, user_message: str) -> str:
         "{datetime}", datetime.now().strftime("%A %d %B %Y, %H:%M")
     )
 
-    # ── Phase de RÉFLEXION (skip si rate limited)────────
-    # On tente la réflexion mais si ça échoue, on passe directement à la réponse
+    # ── Phase de RÉFLEXION (outil + extraction de faits en 1 appel) ────
     tool_result = ""
-    tool_used = None  # Nom de l'outil utilisé (ou None)
+    tool_used = None
     try:
         reflection_messages = [
             {"role": "system", "content": (
                 "Tu es l'agent de reflexion de Jarvis. "
-                "Analyse le message de l'utilisateur et decide si tu dois utiliser un outil.\n\n"
-                "IMPORTANT : N'utilise web_search QUE si l'utilisateur demande une info "
-                "que tu ne connais PAS avec certitude (actualites, paroles de chansons, "
-                "prix actuels, resultats sportifs, etc.). "
-                "Si tu peux repondre de memoire avec certitude, utilise {\"tool\": \"none\"}.\n\n"
+                "Analyse le message et fais 2 choses :\n"
+                "1. Decide si un outil est necessaire\n"
+                "2. Extrais les faits personnels EXPLICITES du message "
+                "(exam, deadline, prenom, formation, etc.)\n\n"
+                "N'utilise web_search QUE pour des infos que tu ne connais PAS "
+                "(actualites, prix, resultats, etc.).\n\n"
                 f"{TOOLS_DESCRIPTION}\n\n"
-                f"Faits memorises :\n{memory.get_facts_summary(user_id)}"
+                f"Faits deja memorises :\n{memory.get_facts_summary(user_id)}"
             )},
-            *history[-6:],
+            *history[-4:],
         ]
 
-        logger.info("Phase de réflexion...")
+        logger.info("Phase de reflexion...")
         reflection_raw = _call_llm(reflection_messages, temperature=0.3)
 
-        # Essayer de parser la décision
+        # Parser le JSON de decision
         json_match = None
         for line in reflection_raw.split("\n"):
             line = line.strip()
@@ -354,17 +333,25 @@ def think_and_respond(user_id: int, user_message: str) -> str:
                 json_match = line
                 break
         if not json_match:
-            import re
-            match = re.search(r'\{[^{}]+\}', reflection_raw)
+            match = re.search(r'\{[^{}]*(?:\[[^\]]*\][^{}]*)*\}', reflection_raw)
             if match:
                 json_match = match.group()
 
         if json_match:
             tool_call = json.loads(json_match)
+
+            # Sauvegarder les faits detectes
+            for fact in tool_call.get("facts", []):
+                if isinstance(fact, dict) and fact.get("key") and fact.get("value"):
+                    cat = fact.get("category", "general")
+                    memory.save_fact(user_id, cat, fact["key"], fact["value"])
+                    logger.info("Fait sauvegarde : [%s] %s = %s", cat, fact["key"], fact["value"])
+
+            # Executer l'outil si besoin
             if tool_call.get("tool") and tool_call["tool"] != "none":
                 tool_used = tool_call["tool"]
                 tool_result = _execute_tool(tool_call, user_id)
-                logger.info("Outil %s → resultat (%d caracteres)", tool_used, len(tool_result))
+                logger.info("Outil %s -> resultat (%d chars)", tool_used, len(tool_result))
     except Exception as e:
         logger.warning("Phase de reflexion echouee, passage direct a la reponse : %s", e)
 
@@ -417,79 +404,7 @@ def think_and_respond(user_id: int, user_message: str) -> str:
     if not response.startswith("Tous mes fournisseurs"):
         memory.save_message(user_id, "assistant", response)
 
-    # 6. Extraction de faits (phase séparée, ne bloque pas la réponse)
-    try:
-        _extract_facts(user_id, user_message)
-    except Exception as e:
-        logger.warning("Extraction de faits echouee : %s", e)
-
     return response
-
-
-# ── Extraction automatique de faits ──────────────────────
-
-def _extract_facts(user_id: int, user_message: str) -> None:
-    """
-    Phase séparée d'extraction de faits.
-    Analyse le dernier message de l'utilisateur et sauvegarde tout fait
-    explicitement mentionné (exam, deadline, préférence, info perso...).
-    """
-    existing_facts = memory.get_facts_summary(user_id)
-
-    extract_messages = [
-        {"role": "system", "content": (
-            "Tu es un extracteur de faits. Ton SEUL role est d'identifier les infos factuelles "
-            "que l'utilisateur mentionne EXPLICITEMENT dans son message.\n\n"
-            "Exemples de faits a extraire :\n"
-            "- 'j'ai un exam de maths vendredi' → {\"facts\": [{\"category\": \"exam\", \"key\": \"maths\", \"value\": \"vendredi\"}]}\n"
-            "- 'je m'appelle Thomas' → {\"facts\": [{\"category\": \"identite\", \"key\": \"prenom\", \"value\": \"Thomas\"}]}\n"
-            "- 'je suis en L2 info' → {\"facts\": [{\"category\": \"etudes\", \"key\": \"formation\", \"value\": \"L2 informatique\"}]}\n"
-            "- 'mon anniversaire c'est le 3 avril' → {\"facts\": [{\"category\": \"perso\", \"key\": \"anniversaire\", \"value\": \"3 avril\"}]}\n"
-            "- 'j'ai rendu le projet' → {\"facts\": [{\"category\": \"etudes\", \"key\": \"projet\", \"value\": \"rendu\"}]}\n"
-            "- 'salut ca va' → {\"facts\": []}\n"
-            "- 'c'est quoi la capitale du Japon' → {\"facts\": []}\n\n"
-            "REGLES :\n"
-            "- Extrais UNIQUEMENT ce que l'utilisateur dit dans SON message\n"
-            "- Ne deduis RIEN, ne suppose RIEN\n"
-            "- Si le message ne contient aucun fait personnel → {\"facts\": []}\n"
-            "- Questions, blagues, commandes = PAS de faits\n"
-            "- Evite les doublons avec les faits existants (ne re-sauvegarde pas la meme chose)\n\n"
-            f"Faits deja memorises :\n{existing_facts}\n\n"
-            "Reponds UNIQUEMENT avec un JSON valide."
-        )},
-        {"role": "user", "content": user_message},
-    ]
-
-    try:
-        raw = _call_llm(extract_messages, temperature=0.1)
-
-        # Parser le JSON
-        json_match = None
-        import re
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if match:
-            json_match = match.group()
-
-        if not json_match:
-            return
-
-        parsed = json.loads(json_match)
-        facts_list = parsed.get("facts", [])
-
-        for fact in facts_list:
-            if not isinstance(fact, dict):
-                continue
-            category = fact.get("category", "general")
-            key = fact.get("key", "")
-            value = fact.get("value", "")
-            if key and value:
-                memory.save_fact(user_id, category, key, value)
-                logger.info("Fait extrait et sauvegarde : [%s] %s = %s", category, key, value)
-
-    except json.JSONDecodeError:
-        logger.debug("Extraction de faits : JSON invalide, ignore")
-    except Exception as e:
-        logger.warning("Extraction de faits echouee : %s", str(e)[:200])
 
 
 # ── Commandes spéciales ──────────────────────────────────

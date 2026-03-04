@@ -2,13 +2,14 @@
 scraper.py — Outil de scraping web pour Jarvis.
 
 Deux modes :
-  1. Recherche Google (via scraping de la page de résultats)
+  1. Recherche web (via duckduckgo-search ou fallback HTML)
   2. Extraction du contenu d'une URL spécifique
 
 Utilise requests + BeautifulSoup (léger, pas besoin de navigateur).
 """
 
 import re
+import time
 import logging
 from urllib.parse import quote_plus, urljoin
 
@@ -22,7 +23,12 @@ logger = logging.getLogger("jarvis.scraper")
 _session = requests.Session()
 _session.headers.update({
     "User-Agent": config.USER_AGENT,
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 })
 
 
@@ -30,42 +36,73 @@ _session.headers.update({
 
 def web_search(query: str, num_results: int = 5) -> list[dict]:
     """
-    Effectue une recherche web via DuckDuckGo HTML (pas d'API key requise).
-    Retourne une liste de dicts : {"title", "url", "snippet"}.
+    Recherche web. Essaie d'abord duckduckgo-search (fiable),
+    puis fallback sur scraping HTML si la lib n'est pas dispo.
     """
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+    # Methode 1 : duckduckgo-search (gere l'anti-bot)
     try:
-        resp = _session.get(url, timeout=10)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.error("Erreur lors de la recherche web : %s", e)
-        return []
+        from duckduckgo_search import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=num_results):
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "snippet": r.get("body", ""),
+                })
+        if results:
+            logger.info("Recherche DDG lib '%s' → %d resultats", query, len(results))
+            return results
+    except ImportError:
+        logger.debug("duckduckgo-search non installe, fallback HTML")
+    except Exception as e:
+        logger.warning("DDG lib echouee : %s — fallback HTML", str(e)[:150])
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    results = []
+    # Methode 2 : scraping HTML DuckDuckGo (fallback)
+    return _web_search_html(query, num_results)
 
-    for item in soup.select(".result__body")[:num_results]:
-        title_tag = item.select_one(".result__title a")
-        snippet_tag = item.select_one(".result__snippet")
 
-        if not title_tag:
-            continue
+def _web_search_html(query: str, num_results: int = 5) -> list[dict]:
+    """Fallback : scraping HTML de DuckDuckGo."""
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+    for attempt in range(2):
+        try:
+            resp = _session.get(url, timeout=12)
+            resp.raise_for_status()
 
-        title = title_tag.get_text(strip=True)
-        link = title_tag.get("href", "")
-        snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = []
 
-        # DuckDuckGo utilise parfois des redirections
-        if "uddg=" in link:
-            from urllib.parse import parse_qs, urlparse
-            parsed = urlparse(link)
-            qs = parse_qs(parsed.query)
-            link = qs.get("uddg", [link])[0]
+            for item in soup.select(".result__body")[:num_results]:
+                title_tag = item.select_one(".result__title a")
+                snippet_tag = item.select_one(".result__snippet")
+                if not title_tag:
+                    continue
 
-        results.append({"title": title, "url": link, "snippet": snippet})
+                title = title_tag.get_text(strip=True)
+                link = title_tag.get("href", "")
+                snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
 
-    logger.info("Recherche '%s' → %d résultats", query, len(results))
-    return results
+                if "uddg=" in link:
+                    from urllib.parse import parse_qs, urlparse
+                    parsed = urlparse(link)
+                    qs = parse_qs(parsed.query)
+                    link = qs.get("uddg", [link])[0]
+
+                results.append({"title": title, "url": link, "snippet": snippet})
+
+            if results:
+                logger.info("Recherche HTML '%s' → %d resultats", query, len(results))
+                return results
+
+            logger.warning("Recherche HTML vide (tentative %d)", attempt + 1)
+            time.sleep(1.5)
+
+        except requests.RequestException as e:
+            logger.error("Erreur recherche HTML (tentative %d) : %s", attempt + 1, e)
+            time.sleep(1.5)
+
+    return []
 
 
 # ── Extraction de contenu ────────────────────────────────
