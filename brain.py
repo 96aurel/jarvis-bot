@@ -268,11 +268,7 @@ def _call_llm(messages: list[dict], temperature: float = 0.7) -> str:
     # Construire la cha\u00eene : [(client, model), ...]
     chain: list[tuple[OpenAI, str]] = [(_client, _model)]
 
-    # Fallback Groq (mod\u00e8le l\u00e9ger)
-    if config.LLM_PROVIDER.lower() == "groq" and config.GROQ_FALLBACK_MODEL != _model:
-        chain.append((_client, config.GROQ_FALLBACK_MODEL))
-
-    # Fallback Gemini (toujours en dernier recours)
+    # Fallback Gemini (dernier recours — gratuit et fiable)
     if _gemini_client:
         chain.append((_gemini_client, config.GEMINI_MODEL))
 
